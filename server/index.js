@@ -16,9 +16,12 @@ const MAX_TEXT_LENGTH = 2000;
 
 // Yandex SpeechKit config
 const YANDEX_API_KEY = (process.env.YANDEX_API_KEY || '').trim();
+const YANDEX_STT_API_KEY = (process.env.YANDEX_STT_API_KEY || process.env.YANDEX_API_KEY || '').trim();
 const YANDEX_FOLDER_ID = (process.env.YANDEX_FOLDER_ID || 'ao72hqptk7qndagdq96a').trim();
-const YANDEX_TTS_URL = 'https://tts.api.ml.yandexcloud.kz/tts/v3/utteranceSynthesis';
+const YANDEX_TTS_URL = 'https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis';
+const YANDEX_STT_URL = 'https://stt.api.cloud.yandex.net/speech/v1/stt:recognize';
 console.log(`[startup] YANDEX_API_KEY length=${YANDEX_API_KEY.length}, prefix=${YANDEX_API_KEY.slice(0,6)}, folder=${YANDEX_FOLDER_ID}`);
+console.log(`[startup] YANDEX_STT_API_KEY length=${YANDEX_STT_API_KEY.length}, prefix=${YANDEX_STT_API_KEY.slice(0,6)}`);
 
 // Vision provider config (Gemini by default)
 const VISION_API_KEY = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
@@ -108,19 +111,21 @@ function getCachePath(text) {
   return path.join(CACHE_DIR, `${textHash(text)}.mp3`);
 }
 
-// ─── Yandex SpeechKit TTS ───
+// ─── Yandex SpeechKit TTS v3 ───
 async function synthesize(text) {
   if (!YANDEX_API_KEY) throw new Error('YANDEX_API_KEY not configured');
   const clean = text.trim().replace(/[\r\n]+/g, ' ');
 
   const body = {
     text: clean,
-    hints: [{ voice: 'amira' }],
+    hints: [
+      { voice: 'amira' },
+    ],
     outputAudioSpec: {
       containerAudio: { containerAudioType: 'MP3' },
     },
+    folderId: YANDEX_FOLDER_ID,
   };
-  if (YANDEX_FOLDER_ID) body.folderId = YANDEX_FOLDER_ID;
 
   const res = await fetch(YANDEX_TTS_URL, {
     method: 'POST',
@@ -137,11 +142,21 @@ async function synthesize(text) {
     throw new Error(`Yandex TTS ${res.status}: ${errText}`);
   }
 
-  const data = await res.json();
-  const base64Audio = data?.result?.audioChunk?.data;
-  if (!base64Audio) throw new Error('No audio in Yandex response');
+  // TTS v3 returns newline-delimited JSON (NDJSON) — one chunk per line
+  const raw = await res.text();
+  const chunks = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      const b64 = obj?.result?.audioChunk?.data;
+      if (b64) chunks.push(b64);
+    } catch {}
+  }
+  if (chunks.length === 0) throw new Error('No audio in Yandex response');
 
-  return Buffer.from(base64Audio, 'base64');
+  return Buffer.concat(chunks.map(b => Buffer.from(b, 'base64')));
 }
 
 async function pregenerate() {
@@ -238,6 +253,48 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
+// STT endpoint — Yandex SpeechKit (для казахского языка)
+// Принимает raw-аудио (OGG_OPUS / WAV / MP3) в теле запроса.
+// Параметры в query: lang (по умолчанию kk-KZ), format (oggopus|lpcm, по умолчанию oggopus)
+app.post('/api/stt', express.raw({ type: '*/*', limit: '20mb' }), async (req, res) => {
+  if (!YANDEX_STT_API_KEY) {
+    return res.status(503).json({ error: 'Yandex STT not configured' });
+  }
+  const audio = req.body;
+  if (!audio || !audio.length) {
+    return res.status(400).json({ error: 'Empty audio body' });
+  }
+  const lang = (req.query.lang || 'kk-KZ').toString();
+  const format = (req.query.format || 'oggopus').toString();
+
+  const params = new URLSearchParams({
+    lang,
+    folderId: YANDEX_FOLDER_ID,
+    format,
+  });
+  if (format === 'lpcm') params.set('sampleRateHertz', (req.query.sampleRateHertz || '48000').toString());
+
+  try {
+    const apiRes = await fetch(`${YANDEX_STT_URL}?${params.toString()}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Api-Key ${YANDEX_STT_API_KEY}`,
+        'x-folder-id': YANDEX_FOLDER_ID,
+      },
+      body: audio,
+    });
+    const data = await apiRes.json().catch(() => ({}));
+    if (!apiRes.ok) {
+      console.error('STT error:', apiRes.status, data);
+      return res.status(apiRes.status).json({ error: data?.error_message || `STT ${apiRes.status}` });
+    }
+    res.json({ text: (data.result || '').trim() });
+  } catch (err) {
+    console.error('STT exception:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Vision analysis endpoint — online only (Gemini)
 app.post('/api/vision/analyze', async (req, res) => {
   if (!VISION_API_KEY) {
@@ -308,6 +365,7 @@ if (fs.existsSync(distPath)) {
 app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`TTS: ${YANDEX_API_KEY ? 'Yandex SpeechKit configured' : 'NOT configured (set YANDEX_API_KEY)'}`);
+  console.log(`STT: ${YANDEX_STT_API_KEY ? 'Yandex SpeechKit configured' : 'NOT configured (set YANDEX_STT_API_KEY)'}`);
   console.log(`Cache: ${CACHE_DIR}`);
   console.log(`Vision: ${VISION_API_KEY ? 'configured' : 'NOT configured (set GEMINI_API_KEY in .env)'}`);
 

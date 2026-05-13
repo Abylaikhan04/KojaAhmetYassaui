@@ -58,7 +58,7 @@ export default function BlindMode() {
       if (audioGuideActiveRef.current) {
         setTimeout(() => playAudioGuide(index + 1), 500);
       }
-    }, lang, { webSpeech: true });
+    }, lang);
   }, [speak, lang, t]);
 
   const registerTap = useCallback(() => {

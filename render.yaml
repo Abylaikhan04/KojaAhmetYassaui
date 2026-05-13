@@ -12,4 +12,8 @@ services:
         sync: false
       - key: YANDEX_API_KEY
         sync: false
+      - key: YANDEX_STT_API_KEY
+        sync: false
+      - key: YANDEX_FOLDER_ID
+        sync: false
 
