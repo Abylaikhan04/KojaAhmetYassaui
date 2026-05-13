@@ -196,10 +196,18 @@ const ALLOWED_ORIGINS = [
   ...(process.env.ALLOWED_ORIGIN ? [process.env.ALLOWED_ORIGIN] : []),
 ];
 
+// Allow all Vercel preview deployments for this project
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/koja-a[^\s.]*\.vercel\.app$/,
+  /^https:\/\/[a-z0-9-]+-abon-s-projects\.vercel\.app$/,
+];
+
 const app = express();
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    if (ALLOWED_ORIGIN_PATTERNS.some(re => re.test(origin))) return callback(null, true);
     callback(null, false);
   },
   credentials: true,
